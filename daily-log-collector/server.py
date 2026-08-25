@@ -44,11 +44,13 @@ _EXTRA_ROOTS = [os.path.expanduser(p.strip())
 
 DEFAULT_LOOKBACK_DAYS = 3
 
-# 宿主侧数据目录(history.json 落这里)+ 让本 server 能 import 同目录/开发目录下的
-# merge_history / render_dashboard(publish_daily_log 用)。
+# 数据目录(history.json 落这里)—— 独立于代码部署目录,重装代码不动历史。
+# 默认 ~/.daily-log-collector,可用环境变量 DAILY_LOG_DATA_DIR 覆盖。
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(_HERE, "data")
+DATA_DIR = os.path.expanduser(
+    os.environ.get("DAILY_LOG_DATA_DIR") or "~/.daily-log-collector")
 HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
+# 让本 server 能 import 同目录/开发目录下的 merge_history / render_dashboard(publish_daily_log 用)。
 for _p in (_HERE, os.path.join(_HERE, "..", "skill", "scripts")):
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
@@ -397,160 +399,147 @@ def parse_git(since_dt: datetime, project_filter: str | None, roots: dict):
 # ============================================================
 # Kiro
 #
-# 存储布局(2026-08 解码):
-#   globalStorage/kiro.kiroagent/<convId>/
-#     414d1636…/<hash>   每个文件 = 一次 execution 的完整 JSON:
-#                        input.data.messages(对话正文=为什么)、actions(工具调用=改动)、
-#                        startTime/endTime、chatSessionId
-#     f62de366…          executions 索引(仅元数据)
-#     74a08cf8…/         每文件快照/diff
-#   项目归属:execution.actions 里写类工具的 input.file 绝对路径 → projects/<name>。
-#   注意:Kiro【运行时也可读】(实测 11/12 文件正常打开,零 PermissionError)——
-#         早前"运行时被锁"是误判(当时 open 的是目录而非文件)。个别 execution 结构
-#         异常(input/data 为 list),单文件跳过即可。
+# 存储布局(2026-08,~/.kiro —— 新版 Kiro 已弃用旧的
+# Library/.../globalStorage/kiro.kiroagent/<convId>/execution-JSON,本 server 不再读它):
+#   ~/.kiro/sessions/<wsHash>/<sessionId>/
+#       session.json    元数据:title、workspacePaths/rootPaths(=项目路径)、
+#                       createdAt/lastModifiedAt、agentMode/status
+#       messages.jsonl  每行 {id, timestamp, payload};payload.type 判别:
+#                         user      → content                = prompt(为什么)
+#                         assistant → content + operationType(Say=正式回答 / Reasoning=思维链)
+#                         tool_call → toolName/kind/args;kind != "read" 且 args 带文件路径 = 改动
+#                         其余(turn_start / tool_result / session_* / usage_* 等)跳过
+#   项目归属直接取 session.json 的 workspacePaths[0](不再靠 action 文件路径反推),
+#   因此"没有代码改动"的纯问答也能被采到。messages.jsonl 是追加写,运行时也可读。
 # ============================================================
 
-import urllib.parse
-
-if _IS_WIN:
-    _KIRO_USER_DIR = os.path.expanduser(r"~/AppData/Roaming/Kiro/User")
-else:  # macOS
-    _KIRO_USER_DIR = os.path.expanduser("~/Library/Application Support/Kiro/User")
-KIRO_WS_STORAGE = os.path.join(_KIRO_USER_DIR, "workspaceStorage")
-KIRO_AGENT_DIR = os.path.join(_KIRO_USER_DIR, "globalStorage", "kiro.kiroagent")
-KIRO_WRITE_ACTIONS = {"create", "replace", "append", "delete"}
+KIRO_SESSIONS_DIR = os.path.expanduser("~/.kiro/sessions")
+# tool_call.args 里可能承载文件路径的键(不同工具命名不一)
+_KIRO_FILE_ARG_KEYS = ("path", "paths", "file", "files", "file_path", "filePath")
 
 
-def _folder_uri_to_path(uri: str | None) -> str | None:
-    """workspace.json 的 folder URI → 本地文件系统路径。
-    例:file:///Users/x/proj -> /Users/x/proj"""
-    if not uri:
+def _iso_z_to_local_iso(s: str | None) -> str | None:
+    """Kiro 的 ISO(带 Z 的 UTC)→ 本地带偏移 iso,和 Claude 侧格式一致以便比较。"""
+    if not s:
         return None
-    path = urllib.parse.unquote(uri)
-    return re.sub(r"^file://", "", path)
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().isoformat()
+    except (ValueError, AttributeError):
+        return None
 
 
-def _project_from_folder_uri(uri: str | None) -> str | None:
-    """把 workspace.json 的 folder URI 解成项目名(归一化到 git 仓库根 / 路径本身)。"""
-    root, _ = _canonical_root(_folder_uri_to_path(uri))
-    return _name_of(root) if root else None
-
-
-def _kiro_workspace_map() -> dict:
-    """{ workspace_hash: folder_uri } —— 从各 workspace.json 读取,可读。"""
-    out = {}
-    if not os.path.isdir(KIRO_WS_STORAGE):
-        return out
-    for wj in glob.glob(os.path.join(KIRO_WS_STORAGE, "*", "workspace.json")):
+def _kiro_iter_sessions():
+    """遍历 ~/.kiro/sessions/*/*/,产出 (session_dir, meta);meta 来自 session.json。"""
+    if not os.path.isdir(KIRO_SESSIONS_DIR):
+        return
+    for sj in glob.glob(os.path.join(KIRO_SESSIONS_DIR, "*", "*", "session.json")):
         try:
-            d = json.load(open(wj, encoding="utf-8"))
-        except Exception:
+            meta = json.load(open(sj, encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
             continue
-        folder = d.get("folder")
-        if folder:
-            out[os.path.basename(os.path.dirname(wj))] = folder
+        if isinstance(meta, dict):
+            yield os.path.dirname(sj), meta
+
+
+def _kiro_session_project(meta: dict) -> str | None:
+    """从 session.json 的 workspacePaths / rootPaths 取项目路径 → 归一化项目名。"""
+    for key in ("workspacePaths", "rootPaths"):
+        paths = meta.get(key)
+        if isinstance(paths, list) and paths and isinstance(paths[0], str):
+            root, _ = _canonical_root(paths[0])
+            if root:
+                return _name_of(root)
+    return None
+
+
+def _kiro_files_from_args(args) -> list[str]:
+    """从 tool_call.args 里抽出文件路径(兼容单个/列表、多种键名)。"""
+    out = []
+    if not isinstance(args, dict):
+        return out
+    for k in _KIRO_FILE_ARG_KEYS:
+        v = args.get(k)
+        if isinstance(v, str):
+            out.append(v)
+        elif isinstance(v, list):
+            out.extend(x for x in v if isinstance(x, str))
     return out
 
 
-def _kiro_project_from_actions(actions, roots: dict) -> str | None:
-    """按写类工具的 input.file 路径反推项目名:优先看该文件落在哪个"已知项目根"下
-    (取最长前缀匹配),否则向上找 git 仓库根兜底。取出现最多者。"""
-    root_paths = sorted(roots.keys(), key=len, reverse=True)
-    counter = {}
-    for a in actions or []:
-        if not isinstance(a, dict):
-            continue
-        f = (a.get("input") or {}).get("file") or ""
-        if not f:
-            continue
-        fp = os.path.abspath(os.path.expanduser(f))
-        name = None
-        for rp in root_paths:
-            base = rp.rstrip("/\\")
-            if fp == base or fp.startswith(base + os.sep):
-                name = roots[rp]["name"]
-                break
-        if not name:
-            gr = _walk_up_git_root(fp)
-            if gr:
-                name = _name_of(gr)
-        if name:
-            counter[name] = counter.get(name, 0) + 1
-    return max(counter, key=counter.get) if counter else None
-
-
-def _kiro_last_user_text(msgs) -> str | None:
-    """取该 execution 里最后一条 user 消息的文本(= 本回合 prompt)。"""
-    txt = None
-    for m in msgs or []:
-        if not isinstance(m, dict) or m.get("role") != "user":
-            continue
-        c = m.get("content")
-        if isinstance(c, str):
-            t = c
-        elif isinstance(c, list):
-            t = "\n".join(b.get("text", "") for b in c
-                          if isinstance(b, dict) and b.get("type") == "text")
-        else:
-            t = ""
-        if t and t.strip():
-            txt = t.strip()
-    return txt
-
-
-def parse_kiro(since_dt: datetime, project_filter: str | None, roots: dict):
-    """
-    扫 Kiro 会话 executions,产出 { project: { date: {prompts[], changes[]} } }。
-    roots 用于把 action 文件路径归属到已知项目根。
-    仅在 Kiro 关闭(文件可读)时能采到;运行时被占用则自然跳过。
-    """
+def parse_kiro(since_dt: datetime, project_filter: str | None):
+    """扫 ~/.kiro/sessions 的会话,产出 { project: { date: {prompts[], changes[], summary} } }。
+    项目名取自 session.json.workspacePaths;prompt 取 user 消息,改动取 kind!='read' 的
+    tool_call,summary 取该会话当天最后一条 assistant 'Say'。"""
     out: dict = {}
-    if not os.path.isdir(KIRO_AGENT_DIR):
-        return out
-    for conv in os.listdir(KIRO_AGENT_DIR):
-        convdir = os.path.join(KIRO_AGENT_DIR, conv)
-        if not os.path.isdir(convdir):
+    for sdir, meta in _kiro_iter_sessions():
+        mpath = os.path.join(sdir, "messages.jsonl")
+        if not os.path.isfile(mpath):
             continue
-        for fp in glob.glob(os.path.join(convdir, "*", "*")):
-            if not os.path.isfile(fp):
+        try:  # mtime 粗过滤:整个会话都早于 since 就跳过
+            if datetime.fromtimestamp(os.path.getmtime(mpath), timezone.utc) < since_dt:
                 continue
-            # 整个文件处理放进 try:execution 文件偶有异常结构(input/data 可能是 list),
-            # 单个畸形文件跳过即可,不能拖垮整次采集。
-            try:
-                if datetime.fromtimestamp(os.path.getmtime(fp), timezone.utc) < since_dt:
+        except OSError:
+            continue
+        project = _kiro_session_project(meta)
+        if not project or (project_filter and project != project_filter):
+            continue
+
+        last_say_by_date = {}
+        try:
+            fh = open(mpath, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
                     continue
-                d = json.load(open(fp, encoding="utf-8", errors="replace"))
-                if not isinstance(d, dict):
+                try:
+                    rec = json.loads(line)
+                except ValueError:
                     continue
-                inp = d.get("input")
-                data = inp.get("data") if isinstance(inp, dict) else None
-                msgs = data.get("messages") if isinstance(data, dict) else None
-                if not msgs:
-                    continue
-                ts = d.get("startTime") or d.get("endTime")
-                date = _epoch_ms_to_local_date(ts)
+                ts = rec.get("timestamp")
+                date = _to_local_date(ts)
                 if not date:
                     continue
-                if ts and datetime.fromtimestamp(ts / 1000, timezone.utc) < since_dt:
+                try:  # 时间过滤
+                    rdt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    if rdt.tzinfo is None:
+                        rdt = rdt.replace(tzinfo=timezone.utc)
+                    if rdt < since_dt:
+                        continue
+                except (ValueError, AttributeError):
                     continue
-                actions = d.get("actions") or []
-                project = _kiro_project_from_actions(actions, roots)
-                if not project or (project_filter and project != project_filter):
+                p = rec.get("payload")
+                if not isinstance(p, dict):
                     continue
-            except (OSError, ValueError, PermissionError, AttributeError, TypeError):
-                continue
+                ptype = p.get("type")
+                day = out.setdefault(project, {}).setdefault(
+                    date, {"prompts": [], "changes": [], "summary": None})
 
-            day = out.setdefault(project, {}).setdefault(date, {"prompts": [], "changes": []})
-            t = _kiro_last_user_text(msgs)
-            if t:
-                low = t.lower().strip()
-                if low not in TRIVIAL_PROMPTS and not any(mk in low for mk in NOISE_MARKERS):
-                    day["prompts"].append(t[:MAX_PROMPT_LEN] + (" …" if len(t) > MAX_PROMPT_LEN else ""))
-            for a in actions:
-                if isinstance(a, dict) and a.get("actionType") in KIRO_WRITE_ACTIONS:
-                    f = (a.get("input") or {}).get("file") if isinstance(a.get("input"), dict) else None
-                    if f:
-                        day["changes"].append({"tool": a["actionType"], "file": f})
+                if ptype == "user":
+                    t = p.get("content")
+                    if isinstance(t, str) and t.strip():
+                        low = t.lower().strip()
+                        if low not in TRIVIAL_PROMPTS and not any(mk in low for mk in NOISE_MARKERS):
+                            day["prompts"].append(
+                                t.strip()[:MAX_PROMPT_LEN] + (" …" if len(t) > MAX_PROMPT_LEN else ""))
+                elif ptype == "assistant" and p.get("operationType") == "Say":
+                    t = p.get("content")
+                    if isinstance(t, str) and t.strip():
+                        last_say_by_date[date] = t.strip()   # 后写覆盖,保留当天最后一段
+                elif ptype == "tool_call" and p.get("kind") != "read":
+                    tool = p.get("toolName") or p.get("actionType") or "edit"
+                    for f in _kiro_files_from_args(p.get("args")):
+                        day["changes"].append({"tool": tool, "file": f})
+
+        for date, say in last_say_by_date.items():
+            d = out.get(project, {}).get(date)
+            if d is not None:
+                d["summary"] = say[-MAX_SUMMARY_LEN:] if len(say) > MAX_SUMMARY_LEN else say
 
     for proj in out.values():
         for day in proj.values():
@@ -574,7 +563,7 @@ def build_events(since: str | None = None, project: str | None = None,
     roots = _discover_roots()
     claude = parse_claude(since_dt, project)
     git = parse_git(since_dt, project, roots)
-    kiro = parse_kiro(since_dt, project, roots)
+    kiro = parse_kiro(since_dt, project)
 
     def _slot(pd, date):
         return pd.setdefault(date, {"prompts": [], "changes": [], "commits": [],
@@ -596,13 +585,15 @@ def build_events(since: str | None = None, project: str | None = None,
             slot = _slot(pd, date)
             slot["commits"] = commits                  # ② 改动(git)
             slot["sources"].append("git")
-    for proj, days in kiro.items():                    # Kiro:正文+改动(仅 Kiro 关闭时可采)
+    for proj, days in kiro.items():                    # Kiro:prompt + 改动 + 收尾总结
         pd = projects.setdefault(proj, {})
         for date, d in days.items():
             slot = _slot(pd, date)
             slot["prompts"] += d["prompts"]
             for c in d["changes"]:
                 slot["changes"].append({**c, "source": "kiro"})
+            if d.get("summary") and not slot.get("summary"):   # 不覆盖 Claude 已有的收尾总结
+                slot["summary"] = d["summary"]
             slot["sources"].append("kiro")
     for pd in projects.values():
         for slot in pd.values():
@@ -652,9 +643,13 @@ def _discover_roots() -> dict:
             iso = datetime.fromtimestamp(os.path.getmtime(newest), timezone.utc).astimezone().isoformat()
             _touch(_peek_cwd(newest), "claude", iso)
 
-    # Kiro:workspace.json 的 folder URI(正文由 parse_kiro 采;这里只贡献"根 + 存在活动")
-    for _ws, folder in _kiro_workspace_map().items():
-        _touch(_folder_uri_to_path(folder), "kiro")
+    # Kiro:每个会话的 session.json.workspacePaths(正文由 parse_kiro 采;这里贡献"根 + 活动时间")
+    for _sdir, meta in _kiro_iter_sessions():
+        for key in ("workspacePaths", "rootPaths"):
+            paths = meta.get(key)
+            if isinstance(paths, list) and paths and isinstance(paths[0], str):
+                _touch(paths[0], "kiro", _iso_z_to_local_iso(meta.get("lastModifiedAt")))
+                break
 
     # 可选逃生舱:额外 git 根下的直接子仓库
     for er in _EXTRA_ROOTS:
