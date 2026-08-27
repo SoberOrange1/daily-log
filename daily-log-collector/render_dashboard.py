@@ -58,6 +58,7 @@ HTML = r"""<!DOCTYPE html>
   .navlink.on{color:var(--accent);background:#141c28}
 
   .datehead{position:sticky;top:0;z-index:3;padding:8px 0;margin-bottom:16px;border-bottom:1px solid #16202f;
+    display:flex;align-items:center;gap:10px;
     font-family:var(--mono);font-size:12px;letter-spacing:.2em;color:var(--dim);
     background:linear-gradient(180deg,var(--bg),rgba(10,12,16,.6))}
   .entry{margin-bottom:28px}
@@ -80,6 +81,49 @@ HTML = r"""<!DOCTYPE html>
   .det-box{margin-top:6px;padding-top:6px;border-top:1px solid var(--edge);font-size:11px;color:var(--dim);overflow-wrap:anywhere;word-break:break-all}
   .quote{border-left:2px solid var(--accent);padding:2px 0 2px 9px;font-style:italic;color:#b9bcc4;font-size:13.5px}
   .small{font-size:11px;color:var(--dim)}
+
+  /* 每日速览:datehead 旁的折叠下拉(默认折叠) */
+  .daysum-btn{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--dim);
+    cursor:pointer;user-select:none;padding:1px 9px;border:1px solid var(--edge);border-radius:9999px}
+  .daysum-btn:hover{color:var(--accent);border-color:var(--accent)}
+  .daysum{margin:-6px 0 18px;padding:12px 15px;background:linear-gradient(180deg,#141b27,#0f141c);
+    border:1px solid var(--edge);border-left:3px solid var(--accent);border-radius:12px;
+    font-size:14px;line-height:1.62;color:var(--ink);overflow-wrap:anywhere;letter-spacing:normal}
+  .daysum.hidden{display:none}
+  .ds-head{font-weight:600;color:var(--ink);margin-bottom:6px}
+  .ds-proj{font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--accent);margin:8px 0 2px}
+  .ds-pts{margin:0 0 4px;padding-left:18px}
+  .ds-pts li{font-size:13px;line-height:1.5;color:#c7ccd6;margin:2px 0}
+  /* 侧栏「周汇总」区 */
+  .weekitem{display:block;padding:5px 10px;border-radius:8px;color:var(--dim);font-size:12px;
+    font-family:var(--mono);cursor:pointer}
+  .weekitem:hover{background:#141c28;color:var(--ink)}
+  .weekitem.all{color:var(--accent)}
+  /* 周汇总全屏页(点某周或「全部」进入,月历按整周选) */
+  #weekpage{position:fixed;inset:0;z-index:100;display:none;background:var(--bg);overflow:auto}
+  #weekpage.show{display:block}
+  .wp-head{display:flex;align-items:center;justify-content:flex-start;gap:16px;padding:18px 28px;
+    border-bottom:1px solid #16202f;position:sticky;top:0;background:var(--bg);z-index:2}
+  .wp-x{cursor:pointer;color:var(--dim);font-family:var(--mono);font-size:12px}.wp-x:hover{color:var(--accent)}
+  .wp-body{display:grid;grid-template-columns:320px 1fr;gap:32px;padding:26px 28px;align-items:start;max-width:1100px}
+  .wp-report{min-width:0}
+  .cal-nav{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .cal-nav b{font-family:var(--serif);font-size:16px}
+  .cal-arrow{cursor:pointer;padding:2px 11px;border:1px solid var(--edge);border-radius:8px;color:var(--dim)}
+  .cal-arrow:hover{color:var(--accent);border-color:var(--accent)}
+  .cal-dow{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:5px}
+  .cal-dow span{text-align:center;font-family:var(--mono);font-size:10px;color:var(--dim)}
+  .cal-wk{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;border-radius:9px;padding:3px;
+    margin-bottom:3px;border:1px solid transparent}
+  .cal-wk.has{cursor:pointer;background:#121924;border-color:var(--edge)}
+  .cal-wk.has:hover{border-color:var(--accent)}
+  .cal-wk.on{border-color:var(--accent);background:#18202e}
+  .cal-day{text-align:center;padding:6px 0;font-size:12px;color:#c7ccd6}
+  .cal-day.out{color:#3a4150}
+  .cal-wk.has .cal-day.rep{color:var(--accent);font-weight:600}
+  .wp-rtitle{font-family:var(--serif);font-weight:600;font-size:18px;margin-bottom:12px}
+  .wp-rtext{font-size:14.5px;line-height:1.75;color:var(--ink);overflow-wrap:anywhere}
+  @media (max-width:820px){.wp-body{grid-template-columns:1fr;gap:20px}}
 
   .gitem{cursor:pointer;border-radius:10px;padding:8px 9px}.gitem:hover{background:#141c28}
   .gitem.on{box-shadow:inset 0 0 0 1px var(--accent)}
@@ -111,6 +155,7 @@ HTML = r"""<!DOCTYPE html>
     <div id="projfilter" style="margin-bottom:20px"></div>
     <div class="col-h">跳转日期</div>
     <nav id="datenav"></nav>
+    <div id="weeklybox"></div>
   </aside>
   <main class="main">
     <div id="wrap"><svg id="wires"></svg><div id="content"></div></div>
@@ -124,6 +169,25 @@ HTML = r"""<!DOCTYPE html>
   </aside>
 </div>
 
+<div id="weekpage">
+  <div class="wp-head">
+    <span class="wp-x" onclick="closeWeekPage()">‹ 返回</span>
+    <div class="serif" style="font-weight:600;font-size:18px">周汇总</div>
+  </div>
+  <div class="wp-body">
+    <div class="wp-cal">
+      <div class="cal-nav">
+        <span class="cal-arrow" onclick="calNav(-1)">‹</span>
+        <b id="callabel"></b>
+        <span class="cal-arrow" onclick="calNav(1)">›</span>
+      </div>
+      <div class="cal-dow"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+      <div id="calgrid"></div>
+    </div>
+    <div class="wp-report"><div class="wp-rtitle" id="wpTitle"></div><div class="wp-rtext" id="wpText"></div></div>
+  </div>
+</div>
+
 <script>
 const DATA = __DATA__;
 const PALETTE = ["#e0a256","#5ec8c8","#e07a9b","#8a86e6","#6db1e6","#c9d06a","#e08a5e","#6ecf9e"];
@@ -133,6 +197,7 @@ const ITYPE = {todo:["TODO","#6db1e6"],risk:["风险","#e0a256"]};
 const MILE="#e6b84a", DONE="#6ecf9e";
 
 let projFilter=null, goalFocus=null, hoverSel=null;
+let WEEKSEL=null, CALY=0, CALM=0;
 let EDGES=[], ADJ={}, RESOLVED=new Set();
 
 function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
@@ -190,14 +255,86 @@ function entryHTML(e){
       <div><div class="col-h">影响 &amp; TODO</div><div class="stack">${mileNodes}${imNodes||(mileNodes?'':dim)}</div></div>
     </div></div>`;
 }
+function fmtSum(s){return esc(s).replace(/\n/g,"<br>");}
+// 每日速览:datehead 旁的下拉(默认折叠)。结构 = headline(总主线)+ by_project(按项目的关键 action/TODO)。
+function togDaysum(btn){const ds=btn.closest(".datehead").nextElementSibling;
+  if(ds&&ds.classList.contains("daysum")){const h=ds.classList.toggle("hidden");
+    btn.textContent=h?"速览 ▾":"速览 ▴";requestAnimationFrame(drawWires);}}
+function hasDaysum(sd){return !!(sd&&(sd.headline||(sd.by_project&&sd.by_project.length)||sd.text));}
+function daysumHTML(sd){
+  if(sd.headline||sd.by_project){
+    const h=sd.headline?`<div class="ds-head">${esc(sd.headline)}</div>`:"";
+    const g=(sd.by_project||[]).map(x=>{
+      const pts=(x.points||[]).map(p=>`<li>${esc(p)}</li>`).join("");
+      return `<div class="ds-proj">${esc(x.project)}</div>`+(pts?`<ul class="ds-pts">${pts}</ul>`:"");
+    }).join("");
+    return h+g;
+  }
+  return fmtSum(sd.text||"");   // 兼容旧的纯字符串
+}
 function graphView(){
+  const DS=(DATA.summaries&&DATA.summaries.daily)||{};
   let html="";
   for(const d of allDates()){
     const es=shownProjects().map(p=>DATA.entries[p][d]).filter(Boolean);
     if(!es.length)continue;
-    html+=`<section id="day-${d}" style="margin-bottom:44px"><div class="datehead">${d}</div>${es.map(entryHTML).join("")}</section>`;
+    const sd=DS[d], has=hasDaysum(sd);
+    const head=`<div class="datehead"><span>${d}</span>`
+      +(has?`<span class="daysum-btn" onclick="togDaysum(this)">速览 ▾</span>`:"")+`</div>`
+      +(has?`<div class="daysum hidden">${daysumHTML(sd)}</div>`:"");
+    html+=`<section id="day-${d}" style="margin-bottom:44px">${head}${es.map(entryHTML).join("")}</section>`;
   }
   return html||`<div class="dim">暂无数据</div>`;
+}
+// 侧栏「周汇总」:最近 3 周 + 「全部 →」入口(footprint 恒定,不随周数增长)
+function weekMap(){return (DATA.summaries&&DATA.summaries.weekly)||{};}
+function weekRange(k){const w=weekMap()[k]||{};
+  return (w.range&&w.range.length===2)?`${w.range[0]} → ${w.range[1]}`:k;}
+function weeklyNav(){
+  const keys=Object.keys(weekMap()).sort().reverse();
+  if(!keys.length)return "";
+  const recent=keys.slice(0,3).map(k=>
+    `<div class="weekitem" onclick="openWeekPage('${k}')">📄 ${weekRange(k).replace(/\d{4}-/g,"")}</div>`).join("");
+  return `<div class="col-h" style="margin-top:24px">周汇总</div>${recent}`
+    +`<div class="weekitem all" onclick="openWeekPage(null)">全部 (${keys.length}) →</div>`;
+}
+// 全屏页 + 月历(按整周点击)
+function localISO(d){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,"0"),a=String(d.getDate()).padStart(2,"0");return `${y}-${m}-${a}`;}
+function openWeekPage(key){
+  const keys=Object.keys(weekMap()).sort().reverse(); if(!keys.length)return;
+  WEEKSEL=key||keys[0];
+  const d=new Date(WEEKSEL+"T00:00:00"); CALY=d.getFullYear(); CALM=d.getMonth();
+  renderCal(); renderReport();
+  document.getElementById("weekpage").classList.add("show");
+}
+function closeWeekPage(){document.getElementById("weekpage").classList.remove("show");}
+function calNav(delta){CALM+=delta; if(CALM<0){CALM=11;CALY--;} if(CALM>11){CALM=0;CALY++;} renderCal();}
+function selectWeek(k){WEEKSEL=k; renderCal(); renderReport();}
+function renderReport(){
+  document.getElementById("wpTitle").textContent="本周速览 · "+weekRange(WEEKSEL);
+  document.getElementById("wpText").innerHTML=fmtSum((weekMap()[WEEKSEL]||{}).text||"");
+}
+function renderCal(){
+  const W=weekMap();
+  const first=new Date(CALY,CALM,1), dow=(first.getDay()+6)%7;
+  const start=new Date(first); start.setDate(first.getDate()-dow);
+  const lastOfMonth=new Date(CALY,CALM+1,0);
+  let rows="", cur=new Date(start);
+  while(cur<=lastOfMonth){
+    const row=[]; for(let i=0;i<7;i++){const d=new Date(cur);d.setDate(cur.getDate()+i);row.push(d);}
+    const r0=localISO(row[0]), r6=localISO(row[6]);
+    const key=Object.keys(W).find(k=>k>=r0&&k<=r6);          // 该周行是否含某周报的 week_end
+    const w=key?W[key]:null, rs=w&&w.range?w.range[0]:null, re=w&&w.range?w.range[1]:key;
+    const cells=row.map(d=>{const iso=localISO(d);
+      const out=d.getMonth()!==CALM?"out":"";
+      const rep=w&&((rs&&re&&iso>=rs&&iso<=re)||iso===key)?"rep":"";
+      return `<div class="cal-day ${out} ${rep}">${d.getDate()}</div>`;}).join("");
+    const cls=key?`has ${key===WEEKSEL?"on":""}`:"", oc=key?`onclick="selectWeek('${key}')"`:"";
+    rows+=`<div class="cal-wk ${cls}" ${oc}>${cells}</div>`;
+    cur.setDate(cur.getDate()+7);
+  }
+  document.getElementById("calgrid").innerHTML=rows;
+  document.getElementById("callabel").textContent=`${CALY} 年 ${CALM+1} 月`;
 }
 
 // —— 边与邻接 ——
@@ -312,6 +449,7 @@ function render(){
   document.getElementById("projfilter").innerHTML=
     `<div class="col-h">项目</div><div onclick="setProj(null)" class="navlink ${projFilter?'':'on'}">全部</div>`+projects().map(chip).join("");
   document.getElementById("datenav").innerHTML=allDates().map(d=>`<a class="navlink mono" href="#day-${d}">${d}</a>`).join("")||'<div class="dim small">无</div>';
+  document.getElementById("weeklybox").innerHTML=weeklyNav();
   computeResolved();
   document.getElementById("content").innerHTML=graphView();
   document.getElementById("goalsbar").innerHTML=goalsBar();
@@ -324,6 +462,7 @@ function setGoal(g){goalFocus=(goalFocus===g)?null:g;hoverSel=null;render();}
 function tog(btn){const d=btn.closest(".node").querySelector(".det");
   if(d){d.classList.toggle("hidden");requestAnimationFrame(drawWires);}}
 window.addEventListener("resize",()=>requestAnimationFrame(drawWires));
+window.addEventListener("keydown",e=>{if(e.key==="Escape")closeWeekPage();});
 render();
 </script>
 </body>

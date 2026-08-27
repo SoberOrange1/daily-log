@@ -30,7 +30,8 @@ def load(path):
             return json.load(open(path, encoding="utf-8"))
         except Exception:
             pass
-    return {"version": 1, "updated_at": None, "entries": {}, "goals": {}}
+    return {"version": 1, "updated_at": None, "entries": {}, "goals": {},
+            "summaries": {"daily": {}, "weekly": {}}}
 
 
 def recompute_goals(history, goal_defs):
@@ -92,7 +93,30 @@ def merge(payload: dict, history: dict, retain_days: int = 365,
             else:
                 del history["entries"][proj]
     history["goals"] = recompute_goals(history, payload.get("goals", {}))
-    history["updated_at"] = datetime.now(timezone.utc).astimezone().isoformat()
+
+    # summaries(顶层,与 entries 平行):daily 覆盖今天(随刷新自动);
+    # weekly 覆盖其 week_end(人为触发时才带)。
+    now_iso = datetime.now(timezone.utc).astimezone().isoformat()
+    S = history.setdefault("summaries", {})
+    S.setdefault("daily", {}); S.setdefault("weekly", {})
+    ds = payload.get("daily_summary")
+    if isinstance(ds, dict) and (ds.get("headline") or ds.get("by_project")):
+        S["daily"][today] = {**ds, "generated_at": now_iso}
+    elif isinstance(ds, str) and ds.strip():                 # 兼容纯字符串
+        S["daily"][today] = {"headline": ds.strip(), "generated_at": now_iso}
+    ws = payload.get("weekly_summary")
+    if isinstance(ws, dict) and isinstance(ws.get("text"), str) and ws["text"].strip():
+        wend = ws.get("week_end") or today
+        item = {"text": ws["text"].strip(), "generated_at": now_iso}
+        if ws.get("week_start") and ws.get("week_end"):
+            item["range"] = [ws["week_start"], ws["week_end"]]
+        S["weekly"][wend] = item
+    if retain_days:
+        scut = (datetime.now(timezone.utc).astimezone().date() - timedelta(days=retain_days)).isoformat()
+        for bucket in ("daily", "weekly"):
+            S[bucket] = {k: v for k, v in S[bucket].items() if k >= scut}
+
+    history["updated_at"] = now_iso
     return skipped
 
 

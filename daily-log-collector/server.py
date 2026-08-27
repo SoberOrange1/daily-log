@@ -60,6 +60,11 @@ MAX_PROMPTS_PER_DAY = 40
 MAX_PROMPT_LEN = 600
 MAX_SUMMARY_LEN = 800
 MAX_CHANGES_PER_DAY = 200
+# 今日速览(daily_summary)紧凑上限:一句话主线 + 按项目分组的关键 action/TODO
+DAILY_HEADLINE_MAX = 40
+DAILY_POINT_MAX = 30
+DAILY_POINTS_PER_PROJECT = 3
+DAILY_PROJECTS_MAX = 8
 
 # 用户消息里属于"系统噪音"、不算真实 prompt 的标记
 NOISE_MARKERS = (
@@ -848,7 +853,39 @@ def _validate_payload(payload):
             arr.append({"id": g["id"], "title": g["title"], "status": st})
         if arr: ngoals[proj] = arr
 
-    if not norm_entries and not errors:
+    # summaries(可选):
+    #   daily_summary(随刷新)= { headline?, by_project:[{project, points[]}] };兼容纯字符串(当 headline)
+    #   weekly_summary(人为触发)= { text, week_start?, week_end? }
+    def _norm_daily(ds):
+        if isinstance(ds, str) and ds.strip():
+            return {"headline": ds.strip()[:DAILY_HEADLINE_MAX]}
+        if not isinstance(ds, dict):
+            return None
+        nd = {}
+        hl = ds.get("headline")
+        if isinstance(hl, str) and hl.strip():
+            nd["headline"] = hl.strip()[:DAILY_HEADLINE_MAX]
+        groups = []
+        for g in (ds.get("by_project") or []):
+            if not isinstance(g, dict):
+                continue
+            proj = g.get("project")
+            if not (isinstance(proj, str) and proj.strip()):
+                continue
+            pts = [p.strip()[:DAILY_POINT_MAX] for p in (g.get("points") or [])
+                   if isinstance(p, str) and p.strip()][:DAILY_POINTS_PER_PROJECT]
+            groups.append({"project": proj.strip(), "points": pts})
+        if groups:
+            nd["by_project"] = groups[:DAILY_PROJECTS_MAX]
+        return nd if (nd.get("headline") or nd.get("by_project")) else None
+
+    nd = _norm_daily(payload.get("daily_summary"))
+    ws = payload.get("weekly_summary")
+    has_daily = bool(nd)
+    has_weekly = isinstance(ws, dict) and isinstance(ws.get("text"), str) and ws["text"].strip()
+
+    # 允许"仅 summary"的提交(如单独重生成周报,可不带 entries)
+    if not norm_entries and not errors and not (has_daily or has_weekly):
         errors.append("没有有效 entries(全部被判为无效)")
 
     # evidence 覆盖:全缺(且条目够多)→ 视为错误,逼 agent 补源对话原话后重试;部分缺 → 提示。
@@ -858,7 +895,16 @@ def _validate_payload(payload):
     elif ev_have < ev_total:
         warnings.append(f"{ev_total - ev_have}/{ev_total} 个 why/impact 缺 evidence(建议补源对话原话)")
 
-    return errors, warnings, {"entries": norm_entries, "goals": ngoals}
+    out = {"entries": norm_entries, "goals": ngoals}
+    if has_daily:
+        out["daily_summary"] = nd
+    if has_weekly:
+        w = {"text": ws["text"].strip()[:MAX_SUMMARY_LEN * 3]}
+        for k in ("week_start", "week_end"):
+            if _DATE_RE.match(str(ws.get(k) or "")):
+                w[k] = ws[k]
+        out["weekly_summary"] = w
+    return errors, warnings, out
 
 
 def get_current_log_impl(days: int = 30) -> dict:

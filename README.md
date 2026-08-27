@@ -39,12 +39,14 @@ bash daily-log-collector/install.sh
 加载后,它的工具会显示为 **always allow**(只读工具,Quick 自动放行)。
 
 ### 第 3 步:让 Quick 配置 daily-log agent
-把仓库里的 **`quick-set-up.md`** 拖进 Quick,并说一句:
+把仓库里的 **`quick-set-up.md`** 和 **`writing-guide.md`** 一起拖进 Quick,并说一句:
 
 > 照这个文档配置一个 daily-log agent。
 
-Quick 的 Agent Builder 会按该文档创建 agent、挂上 daily-log-collector 连接器、
-写好合成工作流指令,并**询问你希望每天几点自动汇总**(默认 17:30)。
+Quick 的 Agent Builder 会按 `quick-set-up.md` 创建 agent、写好合成工作流指令,并把这两份文档
+作为 reference 附给 agent(`quick-set-up.md` 供查 payload 规格,`writing-guide.md` 是写作规范 /
+发布前二轮审查的评分表)。daily-log-collector 是**本地 MCP server**(不是云端连接器,无需 ARN 关联),
+工具会自动对 agent 可用。创建前它会**询问你希望每天几点自动汇总**(默认 17:30)。
 
 ---
 
