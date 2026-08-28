@@ -749,6 +749,8 @@ def _validate_payload(payload):
     if not isinstance(payload, dict):
         return ["payload 必须是对象 {entries:[...], goals:{...}}"], [], {"entries": [], "goals": {}}
     entries = payload.get("entries")
+    if entries is None:            # 仅重生成 summary 时可不带 entries → 视为空数组
+        entries = []
     if not isinstance(entries, list):
         return ["payload.entries 必须是数组"], [], {"entries": [], "goals": {}}
     goals = payload.get("goals") or {}
@@ -854,7 +856,8 @@ def _validate_payload(payload):
         if arr: ngoals[proj] = arr
 
     # summaries(可选):
-    #   daily_summary(随刷新)= { headline?, by_project:[{project, points[]}] };兼容纯字符串(当 headline)
+    #   daily_summary(随刷新)= { date?, headline?, by_project:[{project, points[]}] };兼容纯字符串(当 headline)
+    #     date 缺省=今天;与 entry 同规则(缺失过去日可补、已存在过去日冻结、今天可刷新)
     #   weekly_summary(人为触发)= { text, week_start?, week_end? }
     def _norm_daily(ds):
         if isinstance(ds, str) and ds.strip():
@@ -862,6 +865,9 @@ def _validate_payload(payload):
         if not isinstance(ds, dict):
             return None
         nd = {}
+        d = ds.get("date")
+        if isinstance(d, str) and _DATE_RE.match(d):
+            nd["date"] = d
         hl = ds.get("headline")
         if isinstance(hl, str) and hl.strip():
             nd["headline"] = hl.strip()[:DAILY_HEADLINE_MAX]
@@ -903,6 +909,8 @@ def _validate_payload(payload):
         for k in ("week_start", "week_end"):
             if _DATE_RE.match(str(ws.get(k) or "")):
                 w[k] = ws[k]
+        if ws.get("force"):        # 用户明确要求更新某过去周时透传,解除冻结
+            w["force"] = True
         out["weekly_summary"] = w
     return errors, warnings, out
 
@@ -931,6 +939,31 @@ def get_current_log_impl(days: int = 30) -> dict:
     return {"existing": existing, "goals": goals_out}
 
 
+def get_entries_impl(since: str | None = None, until: str | None = None,
+                     project: str | None = None) -> dict:
+    """返回历史里 [since, until] 区间内【已合成的 entry 正文】(含端点)。
+    供 weekly 从"唯一事实"(daily entry)滚汇总,而非重啃 7 天 raw 事件 —— context 更小、更一致。
+    缺省 until=今天、since=今天前 6 天(即最近一周)。"""
+    empty = {"since": since, "until": until, "entries": {}}
+    if not os.path.exists(HISTORY_PATH):
+        return empty
+    try:
+        h = json.load(open(HISTORY_PATH, encoding="utf-8"))
+    except Exception:
+        return empty
+    today = datetime.now().astimezone().date()
+    until = until or today.isoformat()
+    since = since or (today - timedelta(days=6)).isoformat()
+    out = {}
+    for proj, days in h.get("entries", {}).items():
+        if project and proj != project:
+            continue
+        sel = {d: e for d, e in days.items() if since <= d <= until}
+        if sel:
+            out[proj] = dict(sorted(sel.items()))
+    return {"since": since, "until": until, "entries": out}
+
+
 def publish_daily_log(payload: dict, history_days: int = 365, dashboard_days: int = 60) -> dict:
     """
     宿主侧一步到位:把 LLM 合成的 payload 幂等并入 history.json、重算目标、渲染 dashboard,
@@ -950,11 +983,18 @@ def publish_daily_log(payload: dict, history_days: int = 365, dashboard_days: in
 
     os.makedirs(DATA_DIR, exist_ok=True)
     history = MH.load(HISTORY_PATH)
-    # 是否真有变化(排除 updated_at 时间戳,只比 entries+goals)—— 供 agent 决定要不要重写 artifact。
-    before = json.dumps([history.get("entries", {}), history.get("goals", {})],
-                        sort_keys=True, ensure_ascii=False)
+    # 是否真有变化 —— 供 agent 决定要不要重写 artifact。比 entries+goals+summaries 的【内容】,
+    # 但排除每次都变的 generated_at 时间戳,否则会永远判为 changed。
+    def _sig(h):
+        s = h.get("summaries", {}) or {}
+        summ = {b: {k: {kk: vv for kk, vv in (v or {}).items() if kk != "generated_at"}
+                    for k, v in (s.get(b, {}) or {}).items()}
+                for b in ("daily", "weekly")}
+        return json.dumps([h.get("entries", {}), h.get("goals", {}), summ],
+                          sort_keys=True, ensure_ascii=False)
+    before = _sig(history)
     skipped = MH.merge(payload, history, history_days)   # 已存在的过去日期会被冻结跳过
-    after = json.dumps([history["entries"], history["goals"]], sort_keys=True, ensure_ascii=False)
+    after = _sig(history)
     changed = before != after
 
     if changed:
@@ -1034,6 +1074,21 @@ def _run_mcp():
                     "days": {"type": "integer", "default": 30, "description": "回看多少天的已有记录"}}},
             ),
             Tool(
+                name="get_entries",
+                annotations=_RO,
+                description=("返回 [since, until] 区间内【已合成的 daily entry 正文】(含端点;缺省=最近一周)。"
+                             "生成 weekly_summary 时用它从'唯一事实'(daily entry)滚汇总,而不是重啃 7 天 raw 事件"
+                             "—— context 更小、和源一致、不易截断。"),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "since": {"type": "string", "description": "起始日期 YYYY-MM-DD(含);缺省今天前 6 天"},
+                        "until": {"type": "string", "description": "结束日期 YYYY-MM-DD(含);缺省今天"},
+                        "project": {"type": "string", "description": "只取某项目(可选)"},
+                    },
+                },
+            ),
+            Tool(
                 name="get_git_diff",
                 annotations=_RO,
                 description="按 project + commit sha 返回该提交的 stat 与说明(用于展开某条改动)。",
@@ -1086,6 +1141,9 @@ def _run_mcp():
                 text = json.dumps(list_open_todos_impl(), ensure_ascii=False)
             elif name == "get_current_log":
                 text = json.dumps(get_current_log_impl(arguments.get("days", 30)), ensure_ascii=False)
+            elif name == "get_entries":
+                text = json.dumps(get_entries_impl(arguments.get("since"), arguments.get("until"),
+                                                   arguments.get("project")), ensure_ascii=False)
             elif name == "get_git_diff":
                 text = git_diff_impl(arguments.get("project", ""), arguments.get("sha", ""))
             elif name == "publish_daily_log":

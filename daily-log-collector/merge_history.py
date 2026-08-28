@@ -75,6 +75,7 @@ def merge(payload: dict, history: dict, retain_days: int = 365,
     if today is None:
         today = datetime.now(timezone.utc).astimezone().date().isoformat()
     skipped = []
+    written_dates = set()                     # 本次真正写入的 entry 日期(供 weekly 判断"该周 entry 是否有变")
     for e in payload.get("entries", []):
         proj, d = e.get("project"), e.get("date")
         if not (proj and d):
@@ -84,6 +85,7 @@ def merge(payload: dict, history: dict, retain_days: int = 365,
             skipped.append(f"{proj}/{d}")     # 过去且已存在 → 冻结
             continue
         history["entries"].setdefault(proj, {})[d] = e
+        written_dates.add(d)
     if retain_days:
         cutoff = (datetime.now(timezone.utc).astimezone().date() - timedelta(days=retain_days)).isoformat()
         for proj in list(history["entries"]):
@@ -94,23 +96,41 @@ def merge(payload: dict, history: dict, retain_days: int = 365,
                 del history["entries"][proj]
     history["goals"] = recompute_goals(history, payload.get("goals", {}))
 
-    # summaries(顶层,与 entries 平行):daily 覆盖今天(随刷新自动);
-    # weekly 覆盖其 week_end(人为触发时才带)。
+    # summaries(顶层,与 entries 平行):
+    #   daily 与 entry 同规则 —— 按其 date(缺省今天)存;缺失的过去日可补、已存在的过去日冻结、今天可刷新。
+    #   weekly 是派生聚合,按 week_end 覆盖(可重生成/回溯)。
     now_iso = datetime.now(timezone.utc).astimezone().isoformat()
     S = history.setdefault("summaries", {})
     S.setdefault("daily", {}); S.setdefault("weekly", {})
     ds = payload.get("daily_summary")
+    dval, ddate = None, today
     if isinstance(ds, dict) and (ds.get("headline") or ds.get("by_project")):
-        S["daily"][today] = {**ds, "generated_at": now_iso}
-    elif isinstance(ds, str) and ds.strip():                 # 兼容纯字符串
-        S["daily"][today] = {"headline": ds.strip(), "generated_at": now_iso}
+        dval = {k: v for k, v in ds.items() if k != "date"}   # date 用作 key,不进 value
+        ddate = ds.get("date") or today
+    elif isinstance(ds, str) and ds.strip():                  # 兼容纯字符串 → 落今天
+        dval = {"headline": ds.strip()}
+    if dval is not None:
+        if protect_past and ddate in S["daily"] and ddate < today:
+            skipped.append(f"daily_summary/{ddate}")          # 过去且已存在 → 冻结
+        else:
+            S["daily"][ddate] = {**dval, "generated_at": now_iso}
+    # weekly:过去周(week_end < today)一旦存在就冻结,除非 ①force(用户明确点名更新那周)
+    # 或 ②该周 [week_start, week_end] 内本次有 entry 写入(源事实变了 → 允许自动刷新)。
+    # 当前/未来周(week_end >= today)可自由刷新。
     ws = payload.get("weekly_summary")
     if isinstance(ws, dict) and isinstance(ws.get("text"), str) and ws["text"].strip():
         wend = ws.get("week_end") or today
-        item = {"text": ws["text"].strip(), "generated_at": now_iso}
-        if ws.get("week_start") and ws.get("week_end"):
-            item["range"] = [ws["week_start"], ws["week_end"]]
-        S["weekly"][wend] = item
+        wstart = ws.get("week_start") or wend
+        is_past = wend < today
+        exists = wend in S["weekly"]
+        entries_changed = any(wstart <= wd <= wend for wd in written_dates)
+        if protect_past and is_past and exists and not ws.get("force") and not entries_changed:
+            skipped.append(f"weekly_summary/{wend}")     # 过去周已存在且无 force/无 entry 变化 → 冻结
+        else:
+            item = {"text": ws["text"].strip(), "generated_at": now_iso}
+            if ws.get("week_start") and ws.get("week_end"):
+                item["range"] = [ws["week_start"], ws["week_end"]]
+            S["weekly"][wend] = item
     if retain_days:
         scut = (datetime.now(timezone.utc).astimezone().date() - timedelta(days=retain_days)).isoformat()
         for bucket in ("daily", "weekly"):
