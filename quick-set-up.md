@@ -15,8 +15,8 @@
 1. **确认工具可用(无需挂连接器)**:`daily-log-collector` 是本机注册的 **MCP server**
    —— **不是**云端 action connector,**不需要** ARN 关联。install.sh 已注册、Quick 重载后,
    它的工具会**自动对 agent 可用**(在 skills 里显示为 `user_mcp__daily_log_collector`,只读、已 always-allow)。
-   直接在指令里使用这 6 个工具即可:`fetch_events` / `list_projects` / `list_open_todos` /
-   `get_current_log` / `get_git_diff` / `publish_daily_log`。
+   直接在指令里使用这 7 个工具即可:`fetch_events` / `list_projects` / `list_open_todos` /
+   `get_current_log` / `get_entries` / `get_git_diff` / `publish_daily_log`。
 
 2. **问运行时间(必须问用户)**:创建前先问
    **"每天几点自动汇总当天日志?默认 17:30,可以吗?"**
@@ -56,10 +56,15 @@
    **铁律**:不编造;只写过重要性阈值的内容(例行清理/重命名/格式化/依赖小升级等琐事全丢);每层≤4条,一句一条,平实。
 
 6. 产出速览(summary):
-   - **daily_summary**(每次都产出,**要极简**):`{ headline, by_project:[{project, points}] }` ——
+   - **daily_summary**(每次都产出,**要极简**):`{ date?, headline, by_project:[{project, points}] }` ——
      `headline` 一句话讲今天总主线(≤40字);`by_project` 按项目列关键 action + 遗留 TODO,
      **每项目 ≤3 条、每条 ≤30 字**;能省则省,宁少勿多(超限会被截断)。
-   - **weekly_summary**(仅当用户明确要求"生成/刷新周总结"时才产出):`{text, week_start, week_end}`,过去 7 天滚动叙述——主线进展、完成的目标/里程碑、遗留 TODO/风险。
+     `date` 缺省=今天;与 entry 同规则——**缺失的过去日可补、已存在的过去日不覆盖、今天可反复刷新**。
+     所以若发现过去某天漏了速览(且在 lookback 窗口内),给对应 `date` 补上即可。
+   - **weekly_summary**(仅在 ①用户明确要求"生成/刷新某周" 或 ②本次运行里该周的 daily entry 有新增/变化 时才产出):
+     先调 `get_entries(since, until)` 取那一周**已合成的 daily entry**,从这个"唯一事实"滚汇总(**别重啃 7 天 raw 事件** —— context 小、与源一致、不易截断)。
+     产出 `{text, week_start, week_end, force?}`,过去一周滚动叙述——主线进展、完成的目标/里程碑、遗留 TODO/风险。
+     **过去周一旦已存在就冻结**:要更新过去某周,必须由用户点名并带 `force: true`(否则不覆盖);当前周可刷新,该周 entry 有变化时会自动允许更新。
    质量按《writing-guide.md》(有进展量 / 能量化就量化 / 不模糊 / 逻辑链)。
 
 7. 组装 payload = `{entries:[...], goals:{...}, daily_summary?, weekly_summary?}`(字段见末尾《payload 规格》)。goals 带上本次涉及/需更新状态的目标(含判为 delivered 的)。
@@ -114,9 +119,10 @@ payload 是一个对象:`{ "entries": [...], "goals": {...}, "daily_summary"?, "
 `status`:`active` \| `delivered` \| `shifted` \| `abandoned`。目标达成时写 milestone 并把该 goal 置 `delivered`。
 
 ### summaries(顶层,可选)
-- `daily_summary`:`{ "headline": "总主线≤40字", "by_project": [ { "project": "项目名", "points": ["关键action/TODO≤30字"] } ] }`。
-  每次刷新都产出;`headline` 可选、`by_project` 每项目 `points` ≤3 条;落库覆盖今天。(兼容:给纯字符串则当 headline。)
-- `weekly_summary`:`{ "text": "...", "week_start": "YYYY-MM-DD", "week_end": "YYYY-MM-DD" }`。仅用户触发时产出;落库覆盖其 week_end。
+- `daily_summary`:`{ "date"?: "YYYY-MM-DD", "headline": "总主线≤40字", "by_project": [ { "project": "项目名", "points": ["关键action/TODO≤30字"] } ] }`。
+  `date` 缺省今天;落库按 date 存,**与 entry 同规则:缺失的过去日可补、已存在的过去日冻结不覆盖、今天可刷新**。`headline`/`by_project` 均可选、每项目 `points` ≤3 条。(兼容:纯字符串当 headline,落今天。)
+- `weekly_summary`:`{ "text": "...", "week_start": "YYYY-MM-DD", "week_end": "YYYY-MM-DD", "force"?: true }`。
+  按 `week_end` 存;**过去周已存在则冻结**,除非 `force:true`(用户点名更新)或该周 entry 本次有变化;当前周可刷新。建议用 `get_entries` 从 daily entry 滚汇总。
 - dashboard 展示:daily 挂日期旁折叠(headline + 按项目 bullets)、weekly 进侧栏"周汇总"全屏页。
 
 ### 校验规则(publish_daily_log 会强制)
