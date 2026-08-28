@@ -123,6 +123,13 @@ HTML = r"""<!DOCTYPE html>
   .cal-wk.has .cal-day.rep{color:var(--accent);font-weight:600}
   .wp-rtitle{font-family:var(--serif);font-weight:600;font-size:18px;margin-bottom:12px}
   .wp-rtext{font-size:14.5px;line-height:1.75;color:var(--ink);overflow-wrap:anywhere}
+  /* 块级 markdown(weekly 正文 / daily 兼容字符串)*/
+  .md-h{font-weight:600;color:var(--ink);margin:12px 0 5px}
+  .md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3,.md-h4{font-size:14px;color:var(--accent)}
+  .md-p{margin:6px 0}
+  .md-list{margin:6px 0;padding-left:20px}
+  .md-list li{margin:3px 0}
+  .daysum .md-h{margin:8px 0 4px}.daysum .md-p{margin:4px 0}
   @media (max-width:820px){.wp-body{grid-template-columns:1fr;gap:20px}}
 
   .gitem{cursor:pointer;border-radius:10px;padding:8px 9px}.gitem:hover{background:#141c28}
@@ -255,7 +262,26 @@ function entryHTML(e){
       <div><div class="col-h">影响 &amp; TODO</div><div class="stack">${mileNodes}${imNodes||(mileNodes?'':dim)}</div></div>
     </div></div>`;
 }
-function fmtSum(s){return esc(s).replace(/\n/g,"<br>");}
+// 内联 markdown(作用在已 esc 的串上):**加粗** / `行内代码`
+function _inline(s){return s.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>").replace(/`([^`]+)`/g,"<code>$1</code>");}
+function mdi(s){return _inline(esc(s));}   // 单行内联(daily 的 headline / points)
+// 块级 markdown(weekly 正文 / daily 兼容字符串):标题 / 无序·有序列表 / 段落 + 内联
+function fmtSum(src){
+  const lines=esc(src||"").split(/\r?\n/);
+  let html="", listType=null, buf=[];
+  const closeList=()=>{ if(listType){ html+=`<${listType} class="md-list">`+buf.join("")+`</${listType}>`; listType=null; buf=[]; } };
+  for(const raw of lines){
+    const line=raw.replace(/\s+$/,"");
+    let m;
+    if(!line.trim()){ closeList(); continue; }
+    if(m=line.match(/^(#{1,6})\s+(.*)$/)){ closeList(); const lv=Math.min(m[1].length,4); html+=`<div class="md-h md-h${lv}">${_inline(m[2])}</div>`; continue; }
+    if(m=line.match(/^\s*[-*+]\s+(.*)$/)){ if(listType!=="ul"){closeList();listType="ul";} buf.push(`<li>${_inline(m[1])}</li>`); continue; }
+    if(m=line.match(/^\s*\d+[.)]\s+(.*)$/)){ if(listType!=="ol"){closeList();listType="ol";} buf.push(`<li>${_inline(m[1])}</li>`); continue; }
+    closeList(); html+=`<div class="md-p">${_inline(line)}</div>`;
+  }
+  closeList();
+  return html;
+}
 // 每日速览:datehead 旁的下拉(默认折叠)。结构 = headline(总主线)+ by_project(按项目的关键 action/TODO)。
 function togDaysum(btn){const ds=btn.closest(".datehead").nextElementSibling;
   if(ds&&ds.classList.contains("daysum")){const h=ds.classList.toggle("hidden");
@@ -263,9 +289,9 @@ function togDaysum(btn){const ds=btn.closest(".datehead").nextElementSibling;
 function hasDaysum(sd){return !!(sd&&(sd.headline||(sd.by_project&&sd.by_project.length)||sd.text));}
 function daysumHTML(sd){
   if(sd.headline||sd.by_project){
-    const h=sd.headline?`<div class="ds-head">${esc(sd.headline)}</div>`:"";
+    const h=sd.headline?`<div class="ds-head">${mdi(sd.headline)}</div>`:"";
     const g=(sd.by_project||[]).map(x=>{
-      const pts=(x.points||[]).map(p=>`<li>${esc(p)}</li>`).join("");
+      const pts=(x.points||[]).map(p=>`<li>${mdi(p)}</li>`).join("");
       return `<div class="ds-proj">${esc(x.project)}</div>`+(pts?`<ul class="ds-pts">${pts}</ul>`:"");
     }).join("");
     return h+g;
